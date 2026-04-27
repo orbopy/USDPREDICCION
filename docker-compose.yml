@@ -114,6 +114,19 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/telegram-bot.Dockerfile
+    container_name: usdprediccion-telegram-bot
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   redis_data:
   ml_artifacts:
