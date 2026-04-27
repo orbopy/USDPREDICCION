@@ -1,0 +1,27 @@
+# Env
+.env
+.env.local
+
+# Node
+node_modules/
+dist/
+*.js.map
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# ML artifacts (modelos entrenados — no versionar)
+ml-engine/artifacts/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,119 @@
+version: "3.9"
+
+services:
+
+  # ─────────────────────────────────────────
+  # INFRAESTRUCTURA BASE
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: usdprediccion-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # MICROSERVICIOS
+  # ─────────────────────────────────────────
+  data-ingestion:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/data-ingestion.Dockerfile
+    container_name: usdprediccion-data-ingestion
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - RATE_INTERVAL_MS=60000
+      - NEWS_INTERVAL_MS=300000
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  llm-interpreter:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/llm-interpreter.Dockerfile
+    container_name: usdprediccion-llm-interpreter
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ml-engine:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/ml-engine.Dockerfile
+    container_name: usdprediccion-ml-engine
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - ML_PORT=8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ml_artifacts:/app/artifacts
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  swarm-engine:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/swarm-engine.Dockerfile
+    container_name: usdprediccion-swarm-engine
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/orchestrator.Dockerfile
+    container_name: usdprediccion-orchestrator
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - ML_SERVICE_URL=http://ml-engine:8001
+    depends_on:
+      redis:
+        condition: service_healthy
+      ml-engine:
+        condition: service_started
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api-gateway.Dockerfile
+    container_name: usdprediccion-api-gateway
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - API_PORT=3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  ml_artifacts:
