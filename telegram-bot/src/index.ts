@@ -1,5 +1,6 @@
 import { getUpdates, sendToMany, setMyCommands } from './TelegramClient';
 import { handleCommand, setLastPrediction } from './commands/CommandHandler';
+import { handleOwnerMessage, handleOwnerCommand, isOwner, initOwnerResponseListener } from './commands/OwnerCommands';
 import { SubscriberStore } from './subscribers/SubscriberStore';
 import { formatAlert, formatLLMContext, formatPrediction } from './formatters/messages';
 import { subscribe } from '../shared/utils/redis';
@@ -9,9 +10,8 @@ import type { PredictionResult, LLMContext } from '../shared/types/MarketData';
 const logger = createLogger('telegram-bot');
 const store = new SubscriberStore();
 
-// ─── Umbrales de alerta ────────────────────────────────────────────────────
 const ALERT_CONFIDENCE_MIN = parseFloat(process.env.TELEGRAM_ALERT_CONFIDENCE ?? '0.70');
-const DAILY_REPORT_HOUR    = parseInt(process.env.DAILY_REPORT_HOUR ?? '20');  // 20:00 ARG
+const DAILY_REPORT_HOUR    = parseInt(process.env.DAILY_REPORT_HOUR ?? '20');
 
 // ─── Long polling ──────────────────────────────────────────────────────────
 async function startPolling(): Promise<void> {
@@ -27,13 +27,21 @@ async function startPolling(): Promise<void> {
         const msg = update.message;
         if (!msg?.text) continue;
 
-        const text = msg.text.trim();
+        const chatId  = msg.chat.id;
+        const text    = msg.text.trim();
+        const owner   = isOwner(chatId);
+
         if (text.startsWith('/')) {
-          await handleCommand(
-            msg.chat.id,
-            text,
-            msg.from?.username,
-          ).catch((e) => logger.warn('Command error', e));
+          // Comandos exclusivos del dueño
+          if (owner && ['/agentes', '/openclaw', '/predecir', '/analizar'].some((c) => text.startsWith(c))) {
+            await handleOwnerCommand(chatId, text).catch((e) => logger.warn('Owner command error', e));
+          } else {
+            // Comandos normales (cualquier usuario)
+            await handleCommand(chatId, text, msg.from?.username).catch((e) => logger.warn('Command error', e));
+          }
+        } else if (owner) {
+          // Mensaje de texto del dueño (sin slash) → busca URLs para analizar
+          await handleOwnerMessage(chatId, text).catch((e) => logger.warn('Owner message error', e));
         }
       }
     } catch (err) {
@@ -53,10 +61,7 @@ async function startRedisListeners(): Promise<void> {
       horizonMinutes: number; reasoning: string; emoji: string;
     };
 
-    if (alert.confidence < ALERT_CONFIDENCE_MIN) {
-      logger.debug('Alert below Telegram threshold', { confidence: alert.confidence, min: ALERT_CONFIDENCE_MIN });
-      return;
-    }
+    if (alert.confidence < ALERT_CONFIDENCE_MIN) return;
 
     const text = formatAlert(alert);
     const subs = await store.getAll();
@@ -66,14 +71,13 @@ async function startRedisListeners(): Promise<void> {
     await sendToMany(subs, text);
   });
 
-  // Predicción completa (swarm) — guardamos internamente y broadcast
+  // Predicción completa (swarm) → broadcast
   await subscribe('market:swarm:decision', async (payload: unknown) => {
     const prediction = payload as PredictionResult;
     if (!prediction?.direction) return;
 
     setLastPrediction(prediction);
 
-    // Solo broadcast si confianza alta
     if (prediction.confidence >= ALERT_CONFIDENCE_MIN) {
       const text = formatPrediction(prediction);
       const subs = await store.getAll();
@@ -81,7 +85,7 @@ async function startRedisListeners(): Promise<void> {
     }
   });
 
-  // Contexto LLM — solo a suscriptores cuando el impacto es HIGH
+  // Contexto LLM con impacto alto → broadcast
   await subscribe('market:llm:context', async (payload: unknown) => {
     const ctx = payload as LLMContext;
     if (ctx.impactLevel !== 'HIGH' || ctx.confidence < 0.6) return;
@@ -94,6 +98,9 @@ async function startRedisListeners(): Promise<void> {
     await sendToMany(subs, text);
   });
 
+  // Respuestas del Orchestrator → dueño (canal bidireccional)
+  await initOwnerResponseListener();
+
   logger.info('Redis → Telegram relay active');
 }
 
@@ -103,20 +110,16 @@ function scheduleDailyReport(): void {
     const now = new Date();
     const target = new Date();
     target.setHours(DAILY_REPORT_HOUR, 0, 0, 0);
-    // Ajuste a zona horaria Argentina (UTC-3)
     const diffMs = target.getTime() - now.getTime() - 3 * 60 * 60 * 1000;
     return diffMs > 0 ? diffMs : diffMs + 24 * 60 * 60 * 1000;
   };
 
   const scheduleNext = () => {
     const delay = msUntilReport();
-    const inHours = (delay / 3600000).toFixed(1);
-    logger.info(`Daily report scheduled in ${inHours}h`);
-
+    logger.info(`Daily report scheduled in ${(delay / 3600000).toFixed(1)}h`);
     setTimeout(async () => {
       const subs = await store.getAll();
       if (subs.length > 0) {
-        // Simulamos el comando /informe en broadcast
         await handleCommand(subs[0], '/informe').catch(() => null);
       }
       scheduleNext();
@@ -126,6 +129,14 @@ function scheduleDailyReport(): void {
   scheduleNext();
 }
 
+// ─── Registro de comandos en Telegram ─────────────────────────────────────
+async function registerCommands(): Promise<void> {
+  // Comandos públicos ya registrados en setMyCommands() del TelegramClient
+  // Aquí añadimos los del dueño al mismo set
+  const { setMyCommands: set } = await import('./TelegramClient');
+  await set();
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 async function main() {
   if (!process.env.TELEGRAM_BOT_TOKEN) {
@@ -133,22 +144,23 @@ async function main() {
     process.exit(1);
   }
 
+  const ownerId = process.env.TELEGRAM_OWNER_ID;
   logger.info('Telegram bot starting', {
     alertThreshold: ALERT_CONFIDENCE_MIN,
     dailyReportHour: DAILY_REPORT_HOUR,
+    ownerConfigured: !!ownerId,
   });
 
-  await setMyCommands();
+  await registerCommands();
   await startRedisListeners();
   scheduleDailyReport();
 
-  // Long polling en paralelo
   startPolling().catch((e) => {
     logger.error('Polling fatal error', e);
     process.exit(1);
   });
 
-  logger.info('Bot @usdprediccion_bot is running');
+  logger.info('Bot @usdprediccion_bot running — owner bridge active');
 }
 
 function sleep(ms: number): Promise<void> {

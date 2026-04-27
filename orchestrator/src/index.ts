@@ -1,5 +1,6 @@
 import { AgentRouter } from './router/AgentRouter';
 import { MarketPredictionFlow } from './flows/MarketPredictionFlow';
+import { OwnerCommandFlow } from './flows/OwnerCommandFlow';
 import { DataCollectorAgent } from './agents/DataCollectorAgent';
 import { AGENTS_CONFIG, FLOW_CONFIG } from './config/agents.config';
 import { createLogger } from '../shared/utils/logger';
@@ -12,6 +13,7 @@ async function main() {
   const router = new AgentRouter();
   const dataCollector = new DataCollectorAgent();
   const flow = new MarketPredictionFlow();
+  const ownerFlow = new OwnerCommandFlow();
 
   // Register scheduled agents
   router.register(AGENTS_CONFIG.dataCollector, () =>
@@ -21,8 +23,12 @@ async function main() {
     })
   );
 
-  // Start flow (subscribes to swarm output, triggers ML, dispatches alerts)
+  // Start market prediction flow
   await flow.start();
+
+  // Start owner command flow (bot ↔ orchestrator bridge)
+  await ownerFlow.start();
+  logger.info('Owner command channel active — bot can now send analysis requests');
 
   // Start router (manages agent scheduling)
   await router.start();
